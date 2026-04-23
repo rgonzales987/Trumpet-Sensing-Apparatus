@@ -2,6 +2,7 @@
 # This program was developed with help and code from the following sources:
 # 
 # - https://learn.sparkfun.com/tutorials/raspberry-gpio/all, for working with GPIO pins
+# - https://roboticsbackend.com/raspberry-pi-arduino-serial-communication/#Raspberry_Pi_Software_setup, for working with UART serial
 # - https://www.geeksforgeeks.org/python/python-os-mkdir-method/, for creating a directory
 # - https://www.geeksforgeeks.org/python/python-subprocess-module/, for running commands in a terminal
 # - https://www.raspberrypi.com/documentation/computers/camera_software.html#create-a-time-lapse-video, for working with rpicam-apps
@@ -23,9 +24,9 @@ import time
 GPIO.setmode(GPIO.BCM)
 GPIO.setwarnings(False)
 
-ON_LED = 17
-STATUS_LED = 22
-RECORD_LED = 27
+ON_LED = 22
+STATUS_LED = 27
+RECORD_LED = 17
 RECORD_BUTTON = 24
 TARE_BUTTON = 23
 RESET_PIN = 25
@@ -65,7 +66,6 @@ def read_inputs(ser_obj):
 		strain_2 = float(ser_obj.readline().decode('utf-8').rstrip())
 		strain_3 = float(ser_obj.readline().decode('utf-8').rstrip())
 
-		# return [time, p_diff, p_gauge]
 		return [time, p_diff, p_gauge, strain_1, strain_2, strain_3]
 	except:
 		print("Invalid data, ignoring measurement line")
@@ -89,7 +89,7 @@ def save_inputs(data, path):
 
 ######################################
 
-# create directory name using current time
+# Create directory name using current time
 CURRENT_TIME = time.gmtime()
 YEAR = appendZero(CURRENT_TIME[0])
 MONTH = appendZero(CURRENT_TIME[1])
@@ -103,7 +103,7 @@ TIME_STRING = YEAR + MONTH + DATE + '_' + HOUR + MIN + SEC
 SESSION_DIR = os.path.join(PARENT_DIR, TIME_STRING)
 os.mkdir(SESSION_DIR)
 
-# other constant variables
+# Other constant variables
 BAUD_RATE = 115200	# for serial communication with Arduino
 GAIN = 2 			# units: decibels (dB)
 
@@ -119,20 +119,32 @@ if __name__ == '__main__':
 		GPIO.output(RECORD_LED, GPIO.LOW)
 		
 		# Ask the user to input the recording time for the whole session
-		print('Ensure mouthpiece is inserted, and remove all weight from it')
-		data_duration = input("Insert recording time in seconds: ")
-		valid = False
+		data_duration = 0
+		red_pressed = False
+		blue_pressed = False
 
-		# Removes all invalid inputs (non-numbers and non-positive values)
-		while(valid == False):
-			try:
-				data_duration = int(data_duration)
-				if (data_duration > 0): 
-					valid = True
-				else:
-					data_duration = input("Time must be a non-negative integer. Insert recording time in seconds: ")
-			except:
-				data_duration = input("Invalid input, insert recording time in seconds: ")
+		# Each press of the blue button adds 10 seconds of recording time
+		# If the red button is pressed, the recording time is locked in
+		while(red_pressed == False):
+			if (GPIO.input(TARE_BUTTON)):
+				GPIO.output(STATUS_LED, GPIO.HIGH)
+
+				if (blue_pressed == False):
+					blue_pressed = True
+					data_duration += 10
+			elif (GPIO.input(RECORD_BUTTON)):
+				GPIO.output(STATUS_LED, GPIO.HIGH)
+				time.sleep(0.5)
+				GPIO.output(STATUS_LED, GPIO.LOW)
+
+				red_pressed = True
+			else:
+				GPIO.output(STATUS_LED, GPIO.LOW)
+				blue_pressed = False
+
+		# Ensures a valid input, placing hard limits at 5 sec and 360 sec
+		if (data_duration <= 0): data_duration = 5
+		elif (data_duration > 360): data_duration = 360
 		
 		# For the RPi4B, to allow all serial data to get through
 		LOOP_DURATION = data_duration + 1
@@ -168,81 +180,81 @@ if __name__ == '__main__':
 		# Turn on indicator LED
 		GPIO.output(STATUS_LED, GPIO.HIGH)
 
-		# global changing variables
+		# Global changing variables
 		data_array = []
 		recording = False
 		startTime = time.time()
 		counter = 1
 
-		# set mic gain to 2 dB
+		# Set mic gain to 2 dB
 		gain_command = 'amixer -D hw:1 sset \'Mic\' ' + str(GAIN) + 'dB'
 		subprocess.Popen(gain_command, shell = True)
 
 		while(True):
-			# if record button is pressed, or if it was pressed earlier and data is being recorded
+			# If record button is pressed, or if it was pressed earlier and data is being recorded
 			if (GPIO.input(RECORD_BUTTON) or recording == True):
 				current_time = time.time()
 
-				# if data wasn't being recorded yet
+				# If data wasn't being recorded yet
 				if (recording == False):
-					# remove any input sent before by the Arduino
+					# Remove any input sent before by the Arduino
 					ser.reset_input_buffer()
 
-					# prepare for data collection
+					# Prepare for data collection
 					print('Starting data collection')
 					GPIO.output(STATUS_LED, GPIO.LOW)
 					GPIO.output(RECORD_LED, GPIO.HIGH)
 					startTime = time.time()
 
-					# make a new directory for this specific recording instance
+					# Make a new directory for this specific recording instance
 					recording_dir = os.path.join(SESSION_DIR, 'Recording_' + str(counter))
 					os.mkdir(recording_dir)
 
-					# camera recording command
+					# Camera recording command
 					cam_path = os.path.join(recording_dir, 'camera.mov')
 					cam_command = 'rpicam-vid --level 4.2 --framerate 120 --width 1280 --height 720 --denoise cdn_off -n -t ' + str(LOOP_DURATION) + 's -o ' + cam_path 
 
-					# microphone recording command
+					# Microphone recording command
 					mic_path = os.path.join(recording_dir, 'mic.wav')
 					mic_command = 'arecord -D mic_sv -f S32_LE -r 48000 -c 2 ' + mic_path + ' -d ' + str(LOOP_DURATION)
 
-					# execute the recording commands
+					# Execute the recording commands
 					subprocess.Popen(cam_command, shell = True)
 					subprocess.Popen(mic_command, shell = True)
 
-					# tell Arduino to start sending serial data
+					# Tell Arduino to start sending serial data
 					ser.write(b'Start\n')
 
-					# update necessary variables
+					# Update necessary variables
 					recording = True
 					counter += 1
 
-				# if the recording is over
+				# If the recording is over
 				elif (current_time - startTime >= LOOP_DURATION):
 					GPIO.output(RECORD_LED, GPIO.LOW)
 					print('Ending data collection')
 
-					# save serial data to the file at serial_path
+					# Save serial data to the file at serial_path
 					recording_dir = os.path.join(SESSION_DIR, 'Recording_' + str(counter - 1))
 					serial_path = os.path.join(recording_dir, 'pressure_strain.txt')
 					save_inputs(data_array, serial_path)
 					
-					# update necessary variables
+					# Update necessary variables
 					data_array = []
 					recording = False
 
-					# let the microphone and camera commands fully close out
+					# Let the microphone and camera commands fully close out
 					print('Wait for camera and microphone to reset')
 					time.sleep(2)
 					print('Ready for next recording')
 
 					GPIO.output(STATUS_LED, GPIO.HIGH)
 
-				# if the recording is in progress
+				# If the recording is in progress
 				else:
-					# read the next line if it exists
-					# if it starts with "Data", it's good data; collect it
-					# if it starts with "Ending", the Arduino is done sending data
+					# Read the next line if it exists
+					# If it starts with "Data", it's good data; collect it
+					# If it starts with "Ending", the Arduino is done sending data
 					if ser.in_waiting > 0:
 						line = ser.readline().decode('utf-8').rstrip()
 						if (line.startswith("Data")):
@@ -250,13 +262,13 @@ if __name__ == '__main__':
 						elif (line.startswith("Ending")):
 							print("Serial data finished sending")
 
-			# if tare button is pressed, reset the strain gauges
+			# If tare button is pressed, reset the strain gauges
 			elif (GPIO.input(TARE_BUTTON)):
-				# tell Arduino to reset gauges
+				# Tell Arduino to reset gauges
 				ser.write(b'Zero\n')
 				GPIO.output(STATUS_LED, GPIO.LOW)
 
-				# wait for Arduino to send back a finished message
+				# Wait for Arduino to send back a finished message
 				print('Wait for tare process to finish')
 				line = ""
 				while(line != "Finished"):
@@ -264,17 +276,17 @@ if __name__ == '__main__':
 						line = ser.readline().decode('utf-8').rstrip()
 						time.sleep(0.1)
 
-				# allow for recording again
+				# Allow for recording again
 				print('Tare process finished, ready for next recording')
 				GPIO.output(STATUS_LED, GPIO.HIGH)
 				
-	# hit CTRL+C to end the program
+	# Hit CTRL+C to end the program
 	except KeyboardInterrupt:
 		print('Stopping data collection')
 		GPIO.cleanup()
 		ser.close()
 
-	# if any other error occurs
+	# If any other error occurs
 	except:
 		print('Error occured, shutting down data collection')
 		GPIO.cleanup()
